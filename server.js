@@ -1,15 +1,10 @@
 const express = require('express');
 const admin = require('firebase-admin');
+
 const app = express();
 app.use(express.json());
 
-// تحميل بيانات حساب الخدمة (Service Account) من متغير بيئة
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-// تصحيح الأسطر الجديدة بالمفتاح الخاص (مشكلة شائعة عند حفظ JSON كمتغير بيئة نصي)
-if (serviceAccount.private_key) {
-  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -18,50 +13,93 @@ admin.initializeApp({
 const db = admin.firestore();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 
-// --- التحقق الأولي (يستدعيه Meta مرة وحدة عند تسجيل رابط الـ Webhook) ---
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
+
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
-// --- استقبال الرسائل الفعلية من واتساب ---
 app.post('/webhook', async (req, res) => {
   try {
     const messages = req.body.entry?.[0]?.changes?.[0]?.value?.messages;
+
     if (!messages || messages.length === 0) {
       return res.sendStatus(200);
     }
+
     for (const msg of messages) {
-      const fromNumber = msg.from; // رقم المرسل بدون +
-      const docRef = db.collection('phone_verifications').doc(fromNumber);
-      const doc = await docRef.get();
-      if (doc.exists && doc.data()?.status === 'pending') {
-        await docRef.update({
-          status: 'verified',
-          verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.log(`Verified: ${fromNumber}`);
-      } else {
-        console.log(`No pending verification for: ${fromNumber}`);
-      }
+      await handleIncomingMessage(msg);
     }
+
     res.sendStatus(200);
   } catch (err) {
     console.error('Webhook error:', err);
-    // دايماً رجّع 200 لواتساب حتى لو صار خطأ داخلي، وإلا يعيد المحاولة بشكل مزعج
     res.sendStatus(200);
   }
 });
 
-// endpoint بسيط لإبقاء السيرفر صاحي عبر cron-job.org
-app.get('/ping', (req, res) => res.send('OK'));
+async function handleIncomingMessage(msg) {
+  const fromNumber = msg.from;
 
-// endpoint للتأكد ان السيرفر شغال
+  // نتجاهل أي نوع رسالة غير نصية (صور، صوت، ملصقات...)
+  if (msg.type !== 'text' || !msg.text?.body) {
+    console.log(`Ignored non-text message from: ${fromNumber}`);
+    return;
+  }
+
+  const docRef = db.collection('phone_verifications').doc(fromNumber);
+  const doc = await docRef.get();
+
+  if (!doc.exists) {
+    console.log(`No pending verification for: ${fromNumber}`);
+    return;
+  }
+
+  const data = doc.data();
+
+  if (data.status !== 'pending') {
+    console.log(`Already resolved (${data.status}) for: ${fromNumber}`);
+    return;
+  }
+
+  // فحص انتهاء الصلاحية
+  const expiresAt = data.expiresAt?.toDate?.();
+  if (expiresAt && new Date() > expiresAt) {
+    await docRef.update({ status: 'expired' });
+    console.log(`Expired verification for: ${fromNumber}`);
+    return;
+  }
+
+  // ⬅️ التحقق الفعلي: استخراج الكود من نص الرسالة ومطابقته
+  const extractedCode = extractCode(msg.text.body);
+  const expectedCode = data.code;
+
+  if (!extractedCode || extractedCode !== expectedCode) {
+    console.log(
+      `Code mismatch for ${fromNumber}: got "${extractedCode}", expected "${expectedCode}"`
+    );
+    return; // ما نوثق — الكود غلط أو مو موجود بالرسالة
+  }
+
+  await docRef.update({
+    status: 'verified',
+    verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  console.log(`Verified: ${fromNumber}`);
+}
+
+/// يستخرج أول رقم مكون من 6 أرقام متتالية من نص الرسالة
+function extractCode(text) {
+  const match = text.match(/\b\d{6}\b/);
+  return match ? match[0] : null;
+}
+
+app.get('/ping', (req, res) => res.send('OK'));
 app.get('/', (req, res) => res.send('WhatsApp Webhook Server is running'));
 
 const PORT = process.env.PORT || 3000;
