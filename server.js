@@ -1,11 +1,15 @@
 const express = require('express');
 const admin = require('firebase-admin');
-
 const app = express();
 app.use(express.json());
 
 // تحميل بيانات حساب الخدمة (Service Account) من متغير بيئة
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+// تصحيح الأسطر الجديدة بالمفتاح الخاص (مشكلة شائعة عند حفظ JSON كمتغير بيئة نصي)
+if (serviceAccount.private_key) {
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -19,7 +23,6 @@ app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
@@ -30,16 +33,13 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
   try {
     const messages = req.body.entry?.[0]?.changes?.[0]?.value?.messages;
-
     if (!messages || messages.length === 0) {
       return res.sendStatus(200);
     }
-
     for (const msg of messages) {
       const fromNumber = msg.from; // رقم المرسل بدون +
       const docRef = db.collection('phone_verifications').doc(fromNumber);
       const doc = await docRef.get();
-
       if (doc.exists && doc.data()?.status === 'pending') {
         await docRef.update({
           status: 'verified',
@@ -50,7 +50,6 @@ app.post('/webhook', async (req, res) => {
         console.log(`No pending verification for: ${fromNumber}`);
       }
     }
-
     res.sendStatus(200);
   } catch (err) {
     console.error('Webhook error:', err);
