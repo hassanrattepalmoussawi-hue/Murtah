@@ -13,6 +13,7 @@ admin.initializeApp({
 const db = admin.firestore();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 
+// --- التحقق الأولي (يستدعيه Meta مرة وحدة عند تسجيل رابط الـ Webhook) ---
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -24,6 +25,7 @@ app.get('/webhook', (req, res) => {
   res.sendStatus(403);
 });
 
+// --- استقبال الرسائل الفعلية من واتساب ---
 app.post('/webhook', async (req, res) => {
   try {
     const messages = req.body.entry?.[0]?.changes?.[0]?.value?.messages;
@@ -39,6 +41,7 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     console.error('Webhook error:', err);
+    // دايماً رجّع 200 لواتساب حتى لو صار خطأ داخلي، وإلا يعيد المحاولة بشكل مزعج
     res.sendStatus(200);
   }
 });
@@ -75,7 +78,7 @@ async function handleIncomingMessage(msg) {
     return;
   }
 
-  // ⬅️ التحقق الفعلي: استخراج الكود من نص الرسالة ومطابقته
+  // التحقق الفعلي: استخراج الكود من نص الرسالة ومطابقته
   const extractedCode = extractCode(msg.text.body);
   const expectedCode = data.code;
 
@@ -86,11 +89,29 @@ async function handleIncomingMessage(msg) {
     return; // ما نوثق — الكود غلط أو مو موجود بالرسالة
   }
 
+  // نبحث هل فيه حساب سابق مسجل بهذا الرقم (نفس صيغة الهاتف المخزنة بـ users)
+  const usersSnap = await db.collection('users')
+    .where('phone', '==', data.phone)
+    .limit(1)
+    .get();
+
+  let uid;
+  if (!usersSnap.empty) {
+    uid = usersSnap.docs[0].id; // مستخدم قديم — نفس الـ uid دايمًا، بكل جهاز وكل جلسة
+  } else {
+    uid = db.collection('users').doc().id; // uid جديد محجوز، البروفايل الكامل ينشئ من التطبيق
+  }
+
+  const customToken = await admin.auth().createCustomToken(uid);
+
   await docRef.update({
     status: 'verified',
     verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    uid,
+    customToken,
   });
-  console.log(`Verified: ${fromNumber}`);
+
+  console.log(`Verified: ${fromNumber} → uid: ${uid}`);
 }
 
 /// يستخرج أول رقم مكون من 6 أرقام متتالية من نص الرسالة
@@ -99,7 +120,10 @@ function extractCode(text) {
   return match ? match[0] : null;
 }
 
+// endpoint بسيط لإبقاء السيرفر صاحي عبر cron-job.org
 app.get('/ping', (req, res) => res.send('OK'));
+
+// endpoint للتأكد ان السيرفر شغال
 app.get('/', (req, res) => res.send('WhatsApp Webhook Server is running'));
 
 const PORT = process.env.PORT || 3000;
