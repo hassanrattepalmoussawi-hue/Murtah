@@ -1,7 +1,9 @@
 const express = require('express');
+const cors = require('cors');
 const admin = require('firebase-admin');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
