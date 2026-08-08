@@ -120,6 +120,68 @@ function extractCode(text) {
   return match ? match[0] : null;
 }
 
+
+const crypto = require('crypto');
+
+// ============================================================
+// ============ إنشاء وفحص طلبات توثيق الهاتف ============
+// ============================================================
+
+app.post('/createVerification', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone مطلوب' });
+
+    const id = String(phone).replace('+', '').trim();
+    const code = crypto.randomInt(100000, 999999).toString();
+
+    await db.collection('phone_verifications').doc(id).set({
+      phone,
+      code,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: admin.firestore.Timestamp.fromDate(
+        new Date(Date.now() + 15 * 60 * 1000)
+      ),
+      uid: null,
+      customToken: null,
+    });
+
+    res.json({ code });
+  } catch (err) {
+    console.error('createVerification error:', err);
+    res.status(500).json({ error: 'حدث خطأ' });
+  }
+});
+
+app.get('/verificationStatus/:phone/:code', async (req, res) => {
+  try {
+    const id = String(req.params.phone).replace('+', '').trim();
+    const { code } = req.params;
+
+    const doc = await db.collection('phone_verifications').doc(id).get();
+    if (!doc.exists) return res.status(403).json({ error: 'غير صحيح' });
+
+    const data = doc.data();
+    if (data.code !== code) return res.status(403).json({ error: 'غير صحيح' });
+
+    const expiresAt = data.expiresAt?.toDate?.();
+    if (data.status === 'pending' && expiresAt && new Date() > expiresAt) {
+      await doc.ref.update({ status: 'expired' });
+      return res.json({ status: 'expired' });
+    }
+
+    if (data.status === 'verified') {
+      return res.json({ status: 'verified', customToken: data.customToken });
+    }
+
+    return res.json({ status: data.status });
+  } catch (err) {
+    console.error('verificationStatus error:', err);
+    res.status(500).json({ error: 'حدث خطأ' });
+  }
+});
+
 // endpoint بسيط لإبقاء السيرفر صاحي عبر cron-job.org
 app.get('/ping', (req, res) => res.send('OK'));
 
